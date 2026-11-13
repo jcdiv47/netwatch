@@ -25,8 +25,28 @@ go build -o netwatch ./cmd/netwatch
 go test ./...
 ```
 
-Go toolchain as pinned in go.mod (1.27). Pure-Go SQLite (`modernc.org/sqlite`), no cgo. The UI is plain
-HTML/JS/CSS embedded in the binary (no node, no CDN).
+Go toolchain as pinned in go.mod (1.27). Pure-Go SQLite (`modernc.org/sqlite`), no cgo.
+
+The UI is a React app in `ui/` whose production build is committed to
+`internal/web/static/` and embedded in the binary, so `go build` alone still
+produces a working netwatch (no node needed, nothing loaded from a CDN). Node
+is only needed to change the UI:
+
+```sh
+cd ui
+npm install
+npm run dev      # http://localhost:5173, /api proxied to a running netwatch on :8377
+npm run build    # typecheck, then rewrite ../internal/web/static; rebuild the Go binary after
+```
+
+UI stack: Vite + React + Tailwind v4, with
+[Beautiful UI](https://www.beautifului.dev/)'s foundation (tokens, shadows,
+radii, motion) and atoms, and [EvilCharts](https://evilcharts.com/)
+(Recharts) for the charts. Both are copy-in libraries; their sources live in
+`ui/src/styles/foundation.css`, `ui/src/components/{atoms,primitives}/` and
+`ui/src/registry/`. Local changes to them are marked `netwatch patch`; the one
+that matters is that EvilCharts no longer injects a `<style>` element, because
+netwatch serves the UI with `style-src 'self'`.
 
 The gRPC client is generated from a trimmed copy of sing-box's
 `daemon/started_service.proto` in `proto/` (only `SubscribeConnections` and
@@ -94,14 +114,26 @@ in a user unit it breaks ssh (root-owned config files appear owned by nobody).
 
 ## UI / API
 
-- **Devices** (`/api/devices?range=24h[&all=1]`): totals per device.
+- **Overview** (`/api/overview?range=24h`): network totals, traffic over time,
+  how traffic left the router (sing-box outbound or conntrack bypass class),
+  top devices → top destinations, first-contact feed, top devices and
+  destinations. The routing split reads raw flows, so it reaches back only as
+  far as `retention_days`.
+- **Devices** (`/api/devices?range=24h[&all=1]`): totals per device, with a
+  per-device trend (`spark`, aligned to `buckets`).
 - **Device** (`/api/device?key=<mac>&range=7d`): top domains, traffic chart,
   recent flows, destinations first seen in the range, IP addresses seen.
   Friendly name: `POST /api/device/name {"key":..,"name":..}` (JSON only).
 - **Domains** (`/api/domains?range=&q=`), **Domain**
   (`/api/domain?target=<domain-or-ip>&range=`): which devices contacted it.
-- **Live** (`/api/live`): open connections from memory, with rates.
-- `/api/status`: stream / resolver / conntrack health.
+- **Live** (`/api/live`): open connections from memory, with rates, a
+  throughput chart (sampled by the page while it is open) and current talkers.
+- `/api/status`: stream / resolver / conntrack health, plus the current total
+  rates (`rate_down`, `rate_up`) and `open_all`.
+
+Navigation: `1`–`4` switch views, `⌘K`/`Ctrl K` or `/` opens the device and
+domain finder, `[` collapses the sidebar. The time range, theme and sidebar
+state are remembered in the browser.
 
 Ranges: `6h 24h 7d 30d 90d 365d`. Totals and charts come from the hourly
 rollups, so the 6h/24h ranges start at the top of the hour containing the

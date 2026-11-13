@@ -1,0 +1,65 @@
+@import "@fontsource-variable/inter";
+@import "@fontsource-variable/jetbrains-mono";
+@import "./styles/foundation.css";
+
+/* netwatch layer on top of the Beautiful UI foundation.
+ *  - font faces are self-hosted (the CSP allows no CDN and no data: fonts)
+ *  - the shadcn token names EvilCharts expects are mapped onto Beautiful UI's
+ *  - chart series colors: validated with the dataviz palette validator against
+ *    --surface in both themes (blue/orange for down/up; six categorical slots
+ *    for the Sankey's device nodes, in fixed order). */
+:root {
+  color-scheme: light;
+  --font-inter: "Inter Variable";
+  --font-mono-face: "JetBrains Mono Variable";
+  --series-down: #2a78d6;
+  --series-up: #eb6834;
+}
+
+.dark {
+  color-scheme: dark;
+  --series-down: #3987e5;
+  --series-up: #d95926;
+}
+
+@theme inline {
+  --color-background: var(--surface);
+  --color-foreground: var(--ink);
+  --color-muted: var(--hover-2);
+  --color-muted-foreground: var(--ink-2);
+  --color-border: var(--line-strong);
+  --color-primary: var(--ink);
+  --color-down: var(--series-down);
+  --color-up: var(--series-up);
+  --color-line-soft: var(--line-soft);
+}
+
+/* An app shell, not a showcase: a flat canvas instead of the striped backdrop,
+ * and a denser base size. */
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background: var(--canvas);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+/* Thin, quiet scrollbars inside dense panels. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Recharts focus rings on SVG groups are noise next to our own hover states. */
+.recharts-wrapper:focus-visible,
+.recharts-surface:focus-visible {
+  outline: none;
+}

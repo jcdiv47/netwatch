@@ -343,3 +343,177 @@ func (s *Store) DeviceTotals(ctx context.Context, key string, fromHour int64) (u
 		FROM rollup_hourly WHERE device_key = ? AND hour >= ?`, key, fromHour).Scan(&up, &down, &conns, &targets)
 	return
 }
+
+// Totals sums all traffic since fromHour.
+type Totals struct {
+	Up      int64 `json:"up"`
+	Down    int64 `json:"down"`
+	Conns   int64 `json:"conns"`
+	Devices int64 `json:"devices"`
+	Targets int64 `json:"targets"`
+}
+
+func (s *Store) Totals(ctx context.Context, fromHour int64) (Totals, error) {
+	var t Totals
+	err := s.DB.QueryRowContext(ctx, `SELECT COALESCE(SUM(up),0), COALESCE(SUM(down),0), COALESCE(SUM(conns),0),
+		COUNT(DISTINCT device_key), COUNT(DISTINCT target) FROM rollup_hourly WHERE hour >= ?`, fromHour).
+		Scan(&t.Up, &t.Down, &t.Conns, &t.Devices, &t.Targets)
+	return t, err
+}
+
+// SeriesAll is Series across every device and target.
+func (s *Store) SeriesAll(ctx context.Context, fromHour, bucket, tzOffset int64) ([]Point, error) {
+	if bucket < 3600 {
+		bucket = 3600
+	}
+	rows, err := s.DB.QueryContext(ctx, `SELECT ((hour + ?) / ?) * ? - ? AS b, SUM(up), SUM(down) FROM rollup_hourly
+		WHERE hour >= ? GROUP BY b ORDER BY b`, tzOffset, bucket, bucket, tzOffset, fromHour)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Point
+	for rows.Next() {
+		var p Point
+		if err := rows.Scan(&p.T, &p.Up, &p.Down); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// SeriesByDevice returns, per device key, total bytes (up+down) per bucket
+// keyed by bucket start. Used for the per-row sparklines.
+func (s *Store) SeriesByDevice(ctx context.Context, fromHour, bucket, tzOffset int64) (map[string]map[int64]int64, error) {
+	if bucket < 3600 {
+		bucket = 3600
+	}
+	rows, err := s.DB.QueryContext(ctx, `SELECT device_key, ((hour + ?) / ?) * ? - ? AS b, SUM(up)+SUM(down) FROM rollup_hourly
+		WHERE hour >= ? GROUP BY device_key, b`, tzOffset, bucket, bucket, tzOffset, fromHour)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]map[int64]int64{}
+	for rows.Next() {
+		var k string
+		var b, v int64
+		if err := rows.Scan(&k, &b, &v); err != nil {
+			return nil, err
+		}
+		m := out[k]
+		if m == nil {
+			m = map[int64]int64{}
+			out[k] = m
+		}
+		m[b] = v
+	}
+	return out, rows.Err()
+}
+
+// Link is traffic between one device and one target. An empty DeviceKey or
+// Target stands for "everything else" (outside the requested top sets).
+type Link struct {
+	DeviceKey string `json:"device_key"`
+	Target    string `json:"target"`
+	Up        int64  `json:"up"`
+	Down      int64  `json:"down"`
+}
+
+// Links aggregates traffic since fromHour into a devices x targets matrix,
+// folding every device/target outside the given sets into "".
+func (s *Store) Links(ctx context.Context, fromHour int64, devices, targets []string) ([]Link, error) {
+	in := func(col string, vals []string, args *[]any) string {
+		if len(vals) == 0 {
+			return `''`
+		}
+		for _, v := range vals {
+			*args = append(*args, v)
+		}
+		return `CASE WHEN ` + col + ` IN (?` + strings.Repeat(`,?`, len(vals)-1) + `) THEN ` + col + ` ELSE '' END`
+	}
+	var args []any
+	d := in("device_key", devices, &args)
+	t := in("target", targets, &args)
+	args = append(args, fromHour)
+	rows, err := s.DB.QueryContext(ctx, `SELECT `+d+` AS d, `+t+` AS t, SUM(up), SUM(down) FROM rollup_hourly
+		WHERE hour >= ? GROUP BY d, t ORDER BY SUM(up)+SUM(down) DESC`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Link
+	for rows.Next() {
+		var l Link
+		if err := rows.Scan(&l.DeviceKey, &l.Target, &l.Up, &l.Down); err != nil {
+			return nil, err
+		}
+		out = append(out, l)
+	}
+	return out, rows.Err()
+}
+
+// NewTarget is a destination some device contacted for the first time.
+type NewTarget struct {
+	DeviceKey  string `json:"device_key"`
+	DeviceName string `json:"device_name"`
+	Target     string `json:"target"`
+	FirstSeen  int64  `json:"first_seen"`
+}
+
+// RecentNewTargets lists first contacts at or after since (ms), newest first,
+// across all devices.
+func (s *Store) RecentNewTargets(ctx context.Context, since int64, limit int) ([]NewTarget, error) {
+	rows, err := s.DB.QueryContext(ctx, `SELECT t.device_key, COALESCE(d.kind,''), COALESCE(d.hostname,''), COALESCE(d.friendly_name,''), t.target, t.first_seen
+		FROM device_targets t LEFT JOIN devices d ON d.key = t.device_key
+		WHERE t.first_seen >= ? ORDER BY t.first_seen DESC LIMIT ?`, since, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []NewTarget
+	for rows.Next() {
+		var n NewTarget
+		var kind, host, fr string
+		if err := rows.Scan(&n.DeviceKey, &kind, &host, &fr, &n.Target, &n.FirstSeen); err != nil {
+			return nil, err
+		}
+		if kind == "" {
+			kind = KindOf(n.DeviceKey)
+		}
+		n.DeviceName = DisplayName(n.DeviceKey, kind, host, fr)
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
+// RouteStat is traffic grouped by how it left the router.
+type RouteStat struct {
+	Route string `json:"route"`
+	Up    int64  `json:"up"`
+	Down  int64  `json:"down"`
+	Conns int64  `json:"conns"`
+}
+
+// Routes groups flows created at or after since (ms) by route: the sing-box
+// outbound, or the conntrack class for flows that bypass sing-box. It reads
+// raw flows (absolute per-flow totals), so it only reaches back as far as
+// flow retention and differs slightly from the hourly rollups.
+func (s *Store) Routes(ctx context.Context, since int64) ([]RouteStat, error) {
+	rows, err := s.DB.QueryContext(ctx, `SELECT CASE WHEN source = 'conntrack' THEN inbound WHEN outbound = '' THEN '?' ELSE outbound END AS r,
+		SUM(up), SUM(down), COUNT(*) FROM flows WHERE created_at >= ? GROUP BY r ORDER BY SUM(up)+SUM(down) DESC`, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []RouteStat
+	for rows.Next() {
+		var r RouteStat
+		if err := rows.Scan(&r.Route, &r.Up, &r.Down, &r.Conns); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}

@@ -145,3 +145,97 @@ func TestPrune(t *testing.T) {
 		t.Fatalf("flows=%d rollup up=%d (rollups must outlive flows)", n, up)
 	}
 }
+
+func TestOverviewQueries(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	clock := time.Date(2026, 11, 13, 10, 30, 0, 0, time.UTC)
+	s.Now = func() time.Time { return clock }
+	mk := func(id, dev, domain, out string, up, down int64) flow.Flow {
+		return flow.Flow{ID: id, Source: flow.SourceSingbox, DeviceKey: dev, SrcIP: "192.168.2.10", DstIP: "1.2.3.4",
+			Domain: domain, Outbound: out, CreatedAt: clock.UnixMilli(), Up: up, Down: down}
+	}
+	ct := flow.Flow{ID: "ct-1", Source: flow.SourceConntrack, DeviceKey: "aa", Inbound: "ct:forward", SrcIP: "192.168.2.10",
+		DstIP: "9.9.9.9", CreatedAt: clock.UnixMilli(), Up: 5, Down: 5}
+	if err := s.UpsertFlows(ctx, []flow.Flow{
+		mk("1", "aa", "big.example", "Direct", 10, 1000),
+		mk("2", "aa", "small.example", "Proxy", 1, 10),
+		mk("3", "bb", "big.example", "Direct", 20, 200),
+		mk("4", "cc", "small.example", "Proxy", 2, 2),
+		ct,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	from := clock.Unix()/3600*3600 - 3600
+
+	tot, err := s.Totals(ctx, from)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tot.Up != 38 || tot.Down != 1217 || tot.Conns != 5 || tot.Devices != 3 || tot.Targets != 3 {
+		t.Fatalf("totals: %+v", tot)
+	}
+
+	all, err := s.SeriesAll(ctx, from, 3600, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 || all[0].Up != 38 || all[0].Down != 1217 {
+		t.Fatalf("series: %+v", all)
+	}
+	by, err := s.SeriesByDevice(ctx, from, 3600, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := by["aa"][all[0].T]; got != 1031 {
+		t.Fatalf("device series aa: %d (%v)", got, by)
+	}
+
+	// Top sets {aa} x {big.example}; everything else folds into "".
+	links, err := s.Links(ctx, from, []string{"aa"}, []string{"big.example"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[[2]string]int64{}
+	var sum int64
+	for _, l := range links {
+		got[[2]string{l.DeviceKey, l.Target}] = l.Up + l.Down
+		sum += l.Up + l.Down
+	}
+	want := map[[2]string]int64{{"aa", "big.example"}: 1010, {"aa", ""}: 21, {"", "big.example"}: 220, {"", ""}: 4}
+	if len(got) != len(want) {
+		t.Fatalf("links: %v", got)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Fatalf("link %v = %d, want %d (%v)", k, got[k], v, got)
+		}
+	}
+	if sum != tot.Up+tot.Down {
+		t.Fatalf("links sum %d != total %d", sum, tot.Up+tot.Down)
+	}
+	// No top sets at all: one catch-all row, and no SQL syntax error.
+	if links, err = s.Links(ctx, from, nil, nil); err != nil || len(links) != 1 {
+		t.Fatalf("empty sets: %v %v", links, err)
+	}
+
+	routes, err := s.Routes(ctx, clock.UnixMilli()-1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt := map[string]int64{}
+	for _, r := range routes {
+		rt[r.Route] = r.Up + r.Down
+	}
+	if rt["Direct"] != 1230 || rt["Proxy"] != 15 || rt["ct:forward"] != 10 || len(rt) != 3 {
+		t.Fatalf("routes: %v", rt)
+	}
+
+	nt, err := s.RecentNewTargets(ctx, clock.UnixMilli()-1, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nt) != 5 {
+		t.Fatalf("new targets: %+v", nt)
+	}
+}

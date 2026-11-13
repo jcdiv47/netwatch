@@ -21,7 +21,7 @@ import (
 	"netwatch/internal/tracker"
 )
 
-//go:embed static
+//go:embed all:static
 var staticFS embed.FS
 
 type Server struct {
@@ -43,6 +43,7 @@ func (s *Server) Handler() http.Handler {
 		files.ServeHTTP(w, r)
 	}))
 	mux.HandleFunc("GET /api/status", s.status)
+	mux.HandleFunc("GET /api/overview", s.overview)
 	mux.HandleFunc("GET /api/devices", s.devices)
 	mux.HandleFunc("GET /api/device", s.device)
 	mux.HandleFunc("POST /api/device/name", s.setName)
@@ -111,7 +112,17 @@ func tzOffset() int64 {
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	st, open := s.Tracker.GetStats()
 	last, rerr, ipn, refreshes := s.Resolver.Status()
+	var rateUp, rateDown float64
+	all := s.openFlows()
+	for _, f := range all {
+		rateUp += f.RateUp
+		rateDown += f.RateDown
+	}
 	out := map[string]any{
+		"now":            time.Now().UnixMilli(),
+		"rate_up":        rateUp,
+		"rate_down":      rateDown,
+		"open_all":       len(all), // sing-box stream + conntrack, as listed by /api/live
 		"started":        s.Started,
 		"stream":         s.Collector.Status(),
 		"open":           open,
@@ -136,12 +147,18 @@ func errString(err error) string {
 }
 
 func (s *Server) devices(w http.ResponseWriter, r *http.Request) {
-	fromHour, _, _, label := rangeParams(r)
+	fromHour, bucket, _, label := rangeParams(r)
 	ds, err := s.Store.Devices(r.Context(), fromHour, r.URL.Query().Get("all") == "1")
 	if err != nil {
 		s.fail(w, err, 500)
 		return
 	}
+	byDev, err := s.Store.SeriesByDevice(r.Context(), fromHour, bucket, tzOffset())
+	if err != nil {
+		s.fail(w, err, 500)
+		return
+	}
+	buckets := bucketStarts(fromHour, bucket, byDev)
 	// Annotate open connection counts from memory.
 	openBy := map[string]int{}
 	for _, f := range s.openFlows() {
@@ -149,13 +166,127 @@ func (s *Server) devices(w http.ResponseWriter, r *http.Request) {
 	}
 	type row struct {
 		store.Device
-		Open int `json:"open"`
+		Open  int     `json:"open"`
+		Spark []int64 `json:"spark,omitempty"` // up+down per entry of "buckets"
 	}
 	out := make([]row, 0, len(ds))
 	for _, d := range ds {
-		out = append(out, row{d, openBy[d.Key]})
+		var spark []int64
+		if m := byDev[d.Key]; m != nil {
+			spark = make([]int64, len(buckets))
+			for i, b := range buckets {
+				spark[i] = m[b]
+			}
+		}
+		out = append(out, row{d, openBy[d.Key], spark})
 	}
-	writeJSON(w, map[string]any{"range": label, "devices": out})
+	writeJSON(w, map[string]any{"range": label, "bucket": bucket, "buckets": buckets, "devices": out})
+}
+
+// bucketStarts returns the sorted bucket start times present in byDev. Sub-day
+// buckets are filled in to a regular grid so quiet hours show as gaps; day and
+// week buckets shift with DST, so only the observed ones are used.
+func bucketStarts(fromHour, bucket int64, byDev map[string]map[int64]int64) []int64 {
+	seen := map[int64]bool{}
+	for _, m := range byDev {
+		for b := range m {
+			seen[b] = true
+		}
+	}
+	out := make([]int64, 0, len(seen))
+	for b := range seen {
+		out = append(out, b)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	if len(out) == 0 || bucket >= 86400 {
+		return out
+	}
+	first := out[0]
+	for first-bucket >= fromHour {
+		first -= bucket
+	}
+	last := time.Now().Unix()
+	grid := make([]int64, 0, (last-first)/bucket+1)
+	for b := first; b <= last; b += bucket {
+		grid = append(grid, b)
+	}
+	return grid
+}
+
+// overview is the landing page: network-wide totals, the traffic series, the
+// heaviest devices and destinations, how they connect, and how traffic left.
+func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
+	fromHour, bucket, fromMs, label := rangeParams(r)
+	ctx := r.Context()
+	totals, err := s.Store.Totals(ctx, fromHour)
+	if err != nil {
+		s.fail(w, err, 500)
+		return
+	}
+	series, err := s.Store.SeriesAll(ctx, fromHour, bucket, tzOffset())
+	if err != nil {
+		s.fail(w, err, 500)
+		return
+	}
+	devs, err := s.Store.Devices(ctx, fromHour, false)
+	if err != nil {
+		s.fail(w, err, 500)
+		return
+	}
+	targets, err := s.Store.Targets(ctx, fromHour, "", 12)
+	if err != nil {
+		s.fail(w, err, 500)
+		return
+	}
+	const sankeyDevices, sankeyTargets, topDevices = 6, 8, 12
+	var dk, tk []string
+	for i, d := range devs {
+		if i == sankeyDevices {
+			break
+		}
+		dk = append(dk, d.Key)
+	}
+	for i, t := range targets {
+		if i == sankeyTargets {
+			break
+		}
+		tk = append(tk, t.Target)
+	}
+	links, err := s.Store.Links(ctx, fromHour, dk, tk)
+	if err != nil {
+		s.fail(w, err, 500)
+		return
+	}
+	newT, err := s.Store.RecentNewTargets(ctx, fromMs, 40)
+	if err != nil {
+		s.fail(w, err, 500)
+		return
+	}
+	routes, err := s.Store.Routes(ctx, fromMs)
+	if err != nil {
+		s.fail(w, err, 500)
+		return
+	}
+	openBy := map[string]int{}
+	open := s.openFlows()
+	for _, f := range open {
+		openBy[f.DeviceKey]++
+	}
+	type row struct {
+		store.Device
+		Open int `json:"open"`
+	}
+	top := make([]row, 0, topDevices)
+	for i, d := range devs {
+		if i == topDevices {
+			break
+		}
+		top = append(top, row{d, openBy[d.Key]})
+	}
+	writeJSON(w, map[string]any{
+		"range": label, "bucket": bucket, "totals": totals, "open": len(open), "series": series,
+		"top_devices": top, "top_targets": targets, "links": links, "new_targets": newT, "routes": routes,
+	})
 }
 
 func (s *Server) device(w http.ResponseWriter, r *http.Request) {
