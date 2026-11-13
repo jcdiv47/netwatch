@@ -1,0 +1,13 @@
+# binaries
+/netwatch
+/netwatch-*
+*.exe
+# databases
+*.db
+*.db-wal
+*.db-shm
+*.sqlite*
+# local config (holds the API secret)
+config.toml
+*.local.toml
+.env

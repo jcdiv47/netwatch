@@ -1,0 +1,27 @@
+# systemd user unit for netwatch.
+# Install:  install -Dm755 netwatch ~/.local/bin/netwatch
+#           install -Dm644 netwatch.service ~/.config/systemd/user/netwatch.service
+#           systemctl --user daemon-reload && systemctl --user enable --now netwatch
+# Logs:     journalctl --user -u netwatch -f
+[Unit]
+Description=netwatch - home network traffic monitor (sing-box connection stream)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/netwatch run
+Restart=always
+RestartSec=10
+# The router is queried with the system ssh client (key auth, BatchMode).
+# The key must be usable without an agent prompt (unencrypted key, or an
+# agent socket exported to the user manager).
+# No filesystem sandboxing (ProtectSystem, PrivateTmp, ...): in a user unit
+# those run the service in a user namespace where root-owned files appear
+# owned by "nobody", and ssh then rejects /etc/ssh/ssh_config.d/*.
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=default.target
