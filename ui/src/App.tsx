@@ -4,6 +4,7 @@ import { NAV_KEYS, Sidebar } from "@/components/shell/Sidebar";
 import { TopBar, type Crumb } from "@/components/shell/TopBar";
 import { go, href, useRoute } from "@/lib/router";
 import { sidebarStore } from "@/lib/store";
+import { Connections } from "@/views/Connections";
 import { Device } from "@/views/Device";
 import { Devices } from "@/views/Devices";
 import { Domain } from "@/views/Domain";
@@ -61,7 +62,7 @@ export function App() {
         ]
       : route.view === "domain"
         ? [{ label: "Domains", href: href.domains }, { label: route.arg }]
-        : [{ label: { overview: "Overview", devices: "Devices", domains: "Domains", live: "Live" }[route.view] }];
+        : [{ label: { overview: "Overview", devices: "Devices", domains: "Domains", live: "Live", connections: "Connections" }[route.view] }];
 
   useEffect(() => {
     document.title = `${crumbs[crumbs.length - 1].label} · netwatch`;
@@ -82,6 +83,7 @@ export function App() {
             {route.view === "domains" && <Domains />}
             {route.view === "domain" && <Domain key={route.arg} target={route.arg} />}
             {route.view === "live" && <Live />}
+            {route.view === "connections" && <Connections key={route.arg} initialQuery={route.arg} />}
           </div>
         </main>
       </div>

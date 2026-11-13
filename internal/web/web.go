@@ -50,6 +50,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/domains", s.domains)
 	mux.HandleFunc("GET /api/domain", s.domain)
 	mux.HandleFunc("GET /api/live", s.live)
+	mux.HandleFunc("GET /api/flows", s.flows)
 	return securityHeaders(mux)
 }
 
@@ -438,9 +439,33 @@ func (s *Server) live(w http.ResponseWriter, r *http.Request) {
 		rows = append(rows, store.FlowRow{
 			ID: f.ID, Source: f.Source, DeviceKey: f.DeviceKey, DeviceName: name,
 			SrcIP: f.SrcIP, SrcPort: f.SrcPort, DstIP: f.DstIP, DstPort: f.DstPort, Domain: f.Domain, Target: f.Target(),
-			Network: f.Network, Protocol: f.Protocol, Inbound: f.Inbound, Outbound: f.Outbound, Chain: f.Chain,
+			Network: f.Network, Protocol: f.Protocol, Inbound: f.Inbound, InboundType: f.InboundType,
+			Outbound: f.Outbound, Rule: f.Rule, Chain: f.Chain, User: f.User, IPVersion: f.IPVersion,
 			CreatedAt: f.CreatedAt, Up: f.Up, Down: f.Down, RateUp: f.RateUp, RateDown: f.RateDown,
 		})
 	}
 	writeJSON(w, map[string]any{"now": time.Now().UnixMilli(), "flows": rows})
+}
+
+// flows: recorded connections in the range, open and closed.
+// state=open|closed|all, sort=date|bytes, q=<search>, limit (default 500, max 2000).
+func (s *Server) flows(w http.ResponseWriter, r *http.Request) {
+	_, _, fromMs, label := rangeParams(r)
+	q := r.URL.Query()
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	if limit <= 0 {
+		limit = 500
+	}
+	limit = min(limit, 2000)
+	rows, more, err := s.Store.Flows(r.Context(), store.FlowFilter{
+		Since: fromMs, State: q.Get("state"), Query: q.Get("q"), ByBytes: q.Get("sort") == "bytes", Limit: limit,
+	})
+	if err != nil {
+		s.fail(w, err, 500)
+		return
+	}
+	if rows == nil {
+		rows = []store.FlowRow{}
+	}
+	writeJSON(w, map[string]any{"range": label, "now": time.Now().UnixMilli(), "flows": rows, "more": more, "limit": limit})
 }

@@ -200,43 +200,39 @@ func (s *Store) Series(ctx context.Context, deviceKey, target string, fromHour, 
 }
 
 type FlowRow struct {
-	ID         string  `json:"id"`
-	Source     string  `json:"source"`
-	DeviceKey  string  `json:"device_key"`
-	DeviceName string  `json:"device_name"`
-	SrcIP      string  `json:"src_ip"`
-	SrcPort    int     `json:"src_port"`
-	DstIP      string  `json:"dst_ip"`
-	DstPort    int     `json:"dst_port"`
-	Domain     string  `json:"domain"`
-	Target     string  `json:"target"`
-	Network    string  `json:"network"`
-	Protocol   string  `json:"protocol"`
-	Inbound    string  `json:"inbound"`
-	Outbound   string  `json:"outbound"`
-	Chain      string  `json:"chain"`
-	CreatedAt  int64   `json:"created_at"`
-	ClosedAt   *int64  `json:"closed_at"`
-	Up         int64   `json:"up"`
-	Down       int64   `json:"down"`
-	RateUp     float64 `json:"rate_up,omitempty"`
-	RateDown   float64 `json:"rate_down,omitempty"`
+	ID          string  `json:"id"`
+	Source      string  `json:"source"`
+	DeviceKey   string  `json:"device_key"`
+	DeviceName  string  `json:"device_name"`
+	SrcIP       string  `json:"src_ip"`
+	SrcPort     int     `json:"src_port"`
+	DstIP       string  `json:"dst_ip"`
+	DstPort     int     `json:"dst_port"`
+	Domain      string  `json:"domain"`
+	Target      string  `json:"target"`
+	Network     string  `json:"network"`
+	Protocol    string  `json:"protocol"`
+	Inbound     string  `json:"inbound"`
+	InboundType string  `json:"inbound_type"`
+	Outbound    string  `json:"outbound"`
+	Rule        string  `json:"rule"`
+	Chain       string  `json:"chain"`
+	User        string  `json:"user"`
+	IPVersion   int     `json:"ip_version"`
+	CreatedAt   int64   `json:"created_at"`
+	ClosedAt    *int64  `json:"closed_at"`
+	Up          int64   `json:"up"`
+	Down        int64   `json:"down"`
+	RateUp      float64 `json:"rate_up,omitempty"`
+	RateDown    float64 `json:"rate_down,omitempty"`
 }
 
-// RecentFlows by device or target (one set).
-func (s *Store) RecentFlows(ctx context.Context, deviceKey, target string, limit int) ([]FlowRow, error) {
-	col, val := "f.device_key", deviceKey
-	if deviceKey == "" {
-		col, val = "f.target", target
-	}
-	rows, err := s.DB.QueryContext(ctx, `SELECT f.conn_id, f.source, f.device_key, COALESCE(d.kind,''), COALESCE(d.hostname,''), COALESCE(d.friendly_name,''),
-		f.src_ip, f.src_port, f.dst_ip, f.dst_port, f.domain, f.target, f.network, f.protocol, f.inbound, f.outbound, f.chain,
-		f.created_at, f.closed_at, f.up, f.down
-		FROM flows f LEFT JOIN devices d ON d.key = f.device_key
-		WHERE `+col+` = ? ORDER BY f.created_at DESC LIMIT ?`, val, limit)
-	if err != nil {
-		return nil, err
-	}
+const flowSelect = `SELECT f.conn_id, f.source, f.device_key, COALESCE(d.kind,''), COALESCE(d.hostname,''), COALESCE(d.friendly_name,''),
+	f.src_ip, f.src_port, f.dst_ip, f.dst_port, f.domain, f.target, f.network, f.protocol, f.inbound, f.inbound_type,
+	f.outbound, f.rule, f.chain, f.user, f.ip_version, f.created_at, f.closed_at, f.up, f.down
+	FROM flows f LEFT JOIN devices d ON d.key = f.device_key `
+
+func scanFlows(rows *sql.Rows) ([]FlowRow, error) {
 	defer rows.Close()
 	var out []FlowRow
 	for rows.Next() {
@@ -244,7 +240,8 @@ func (s *Store) RecentFlows(ctx context.Context, deviceKey, target string, limit
 		var kind, host, fr string
 		var closed sql.NullInt64
 		if err := rows.Scan(&r.ID, &r.Source, &r.DeviceKey, &kind, &host, &fr, &r.SrcIP, &r.SrcPort, &r.DstIP, &r.DstPort,
-			&r.Domain, &r.Target, &r.Network, &r.Protocol, &r.Inbound, &r.Outbound, &r.Chain, &r.CreatedAt, &closed, &r.Up, &r.Down); err != nil {
+			&r.Domain, &r.Target, &r.Network, &r.Protocol, &r.Inbound, &r.InboundType, &r.Outbound, &r.Rule, &r.Chain,
+			&r.User, &r.IPVersion, &r.CreatedAt, &closed, &r.Up, &r.Down); err != nil {
 			return nil, err
 		}
 		if kind == "" {
@@ -258,6 +255,122 @@ func (s *Store) RecentFlows(ctx context.Context, deviceKey, target string, limit
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// RecentFlows by device or target (one set).
+func (s *Store) RecentFlows(ctx context.Context, deviceKey, target string, limit int) ([]FlowRow, error) {
+	col, val := "f.device_key", deviceKey
+	if deviceKey == "" {
+		col, val = "f.target", target
+	}
+	rows, err := s.DB.QueryContext(ctx, flowSelect+`WHERE `+col+` = ? ORDER BY f.created_at DESC LIMIT ?`, val, limit)
+	if err != nil {
+		return nil, err
+	}
+	return scanFlows(rows)
+}
+
+// FlowFilter selects flows for the connections list.
+type FlowFilter struct {
+	Since   int64  // created_at >= Since (unix ms)
+	State   string // "open", "closed", anything else: both
+	Query   string // see flowQuery
+	ByBytes bool   // largest first instead of newest first
+	Limit   int
+}
+
+var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+
+func like(v string) string { return "%" + likeEscaper.Replace(v) + "%" }
+
+// flowQuery turns a search string into SQL conditions. Words are ANDed. A
+// word of the form key:value tests one field; the keys are the ones the
+// sing-box dashboard understands (network, inbound, inbound.type, source,
+// destination, outbound) plus device, domain, target (exact), protocol, rule,
+// user and port.
+// Any other word matches the device, domain, addresses or outbound.
+func flowQuery(q string) (conds []string, args []any) {
+	const esc = ` ESCAPE '\'`
+	anyOf := func(v string, cols ...string) {
+		parts := make([]string, len(cols))
+		for i, c := range cols {
+			parts[i] = c + " LIKE ?" + esc
+			args = append(args, like(v))
+		}
+		conds = append(conds, "("+strings.Join(parts, " OR ")+")")
+	}
+	plain := func(v string) {
+		anyOf(v, "f.target", "f.dst_ip", "f.src_ip", "f.outbound", "f.chain", "f.device_key", "d.hostname", "d.friendly_name")
+	}
+	for _, tok := range strings.Fields(q) {
+		key, val, ok := strings.Cut(tok, ":")
+		if !ok || key == "" || val == "" {
+			plain(tok)
+			continue
+		}
+		switch strings.ToLower(key) {
+		case "network":
+			conds = append(conds, "f.network = ?")
+			args = append(args, strings.ToLower(val))
+		case "port":
+			conds = append(conds, "CAST(f.dst_port AS TEXT) = ?")
+			args = append(args, val)
+		case "inbound":
+			anyOf(val, "f.inbound")
+		case "inbound.type":
+			anyOf(val, "f.inbound_type")
+		case "source":
+			anyOf(val, "f.src_ip || ':' || f.src_port")
+		case "destination":
+			anyOf(val, "f.dst_ip || ':' || f.dst_port", "f.domain")
+		case "outbound":
+			anyOf(val, "f.outbound", "f.chain")
+		case "device":
+			anyOf(val, "f.device_key", "d.hostname", "d.friendly_name")
+		case "domain":
+			anyOf(val, "f.domain")
+		case "target":
+			conds = append(conds, "f.target = ?")
+			args = append(args, val)
+		case "protocol":
+			anyOf(val, "f.protocol")
+		case "rule":
+			anyOf(val, "f.rule")
+		case "user":
+			anyOf(val, "f.user")
+		default:
+			plain(tok)
+		}
+	}
+	return conds, args
+}
+
+// Flows lists recorded connections, newest (or largest) first. more reports
+// whether the limit cut the list short.
+func (s *Store) Flows(ctx context.Context, f FlowFilter) (out []FlowRow, more bool, err error) {
+	conds, args := flowQuery(f.Query)
+	conds = append([]string{"f.created_at >= ?"}, conds...)
+	args = append([]any{f.Since}, args...)
+	switch f.State {
+	case "open":
+		conds = append(conds, "f.closed_at IS NULL")
+	case "closed":
+		conds = append(conds, "f.closed_at IS NOT NULL")
+	}
+	order := "f.created_at DESC"
+	if f.ByBytes {
+		order = "f.up + f.down DESC, f.created_at DESC"
+	}
+	rows, err := s.DB.QueryContext(ctx, flowSelect+"WHERE "+strings.Join(conds, " AND ")+" ORDER BY "+order+" LIMIT ?",
+		append(args, f.Limit+1)...)
+	if err != nil {
+		return nil, false, err
+	}
+	out, err = scanFlows(rows)
+	if len(out) > f.Limit {
+		out, more = out[:f.Limit], true
+	}
+	return out, more, err
 }
 
 // NewTargets returns targets a device first contacted at or after since (ms).

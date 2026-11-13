@@ -239,3 +239,75 @@ func TestOverviewQueries(t *testing.T) {
 		t.Fatalf("new targets: %+v", nt)
 	}
 }
+
+func TestFlowsFilter(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	now := time.Date(2026, 11, 13, 10, 30, 0, 0, time.UTC)
+	s.Now = func() time.Time { return now }
+	ms := now.UnixMilli()
+	if err := s.UpsertFlows(ctx, []flow.Flow{
+		{ID: "1", Source: flow.SourceSingbox, DeviceKey: "aa", Inbound: "tun-in", InboundType: "tun", Network: "tcp", Protocol: "tls",
+			SrcIP: "192.168.2.10", SrcPort: 5000, DstIP: "1.2.3.4", DstPort: 443, Domain: "big.example", Outbound: "Proxy",
+			Rule: "rule_set=geosite => route(Proxy)", Chain: "Proxy / hk-01", IPVersion: 4, CreatedAt: ms - 3000, ClosedAt: ms - 1000, Up: 10, Down: 1000},
+		{ID: "2", Source: flow.SourceSingbox, DeviceKey: "bb", Inbound: "ss-in", InboundType: "shadowsocks", Network: "udp", User: "phone",
+			SrcIP: "192.168.2.11", SrcPort: 6000, DstIP: "5.6.7.8", DstPort: 53, Domain: "100%_dns.example", Outbound: "Direct",
+			IPVersion: 4, CreatedAt: ms - 2000, Up: 5, Down: 5},
+		{ID: "3", Source: flow.SourceSingbox, DeviceKey: "aa", Inbound: "tun-in", InboundType: "tun", Network: "tcp",
+			SrcIP: "192.168.2.10", SrcPort: 5001, DstIP: "9.9.9.9", DstPort: 443, Outbound: "Direct", IPVersion: 4, CreatedAt: ms - 100000, Up: 1, Down: 1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ids := func(f FlowFilter) string {
+		t.Helper()
+		f.Limit = max(f.Limit, 10)
+		if f.Since == 0 {
+			f.Since = ms - 10000
+		}
+		rows, _, err := s.Flows(ctx, f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out string
+		for _, r := range rows {
+			out += r.ID
+		}
+		return out
+	}
+	for _, c := range []struct {
+		f    FlowFilter
+		want string
+	}{
+		{FlowFilter{}, "21"},                    // newest first, range excludes 3
+		{FlowFilter{Since: 1}, "213"},           //
+		{FlowFilter{ByBytes: true}, "12"},       //
+		{FlowFilter{State: "closed"}, "1"},      //
+		{FlowFilter{State: "open"}, "2"},        //
+		{FlowFilter{Query: "network:UDP"}, "2"}, //
+		{FlowFilter{Query: "inbound.type:shadow"}, "2"},
+		{FlowFilter{Query: "outbound:hk"}, "1"}, // matches the chain
+		{FlowFilter{Query: "source:192.168.2.10:5000"}, "1"},
+		{FlowFilter{Query: "destination:1.2.3.4:443"}, "1"},
+		{FlowFilter{Query: "destination:big"}, "1"},
+		{FlowFilter{Query: "rule:geosite"}, "1"},
+		{FlowFilter{Query: "target:big.example"}, "1"},
+		{FlowFilter{Query: "target:big"}, ""},
+		{FlowFilter{Query: "user:phone port:53"}, "2"},
+		{FlowFilter{Query: "device:aa", Since: 1}, "13"},
+		{FlowFilter{Query: "example network:tcp"}, "1"},
+		{FlowFilter{Query: "100%_"}, "2"}, // LIKE wildcards are literal
+		{FlowFilter{Query: "%"}, "2"},
+		{FlowFilter{Query: "nosuch:big"}, ""}, // unknown key: plain match of the whole word
+	} {
+		if got := ids(c.f); got != c.want {
+			t.Errorf("%+v: got %q want %q", c.f, got, c.want)
+		}
+	}
+	rows, more, err := s.Flows(ctx, FlowFilter{Since: 1, Limit: 2})
+	if err != nil || len(rows) != 2 || !more {
+		t.Fatalf("limit: %d rows, more=%v, err=%v", len(rows), more, err)
+	}
+	if r := rows[1]; r.Rule == "" || r.InboundType != "tun" || r.IPVersion != 4 || r.ClosedAt == nil {
+		t.Fatalf("detail fields: %+v", r)
+	}
+}

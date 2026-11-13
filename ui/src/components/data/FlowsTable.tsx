@@ -1,7 +1,9 @@
 import { useMemo } from "react";
 import { DeviceLink, Mono, SourcePill, TargetLink } from "@/components/data/Bits";
+import { useFlowDetail } from "@/components/data/FlowDetail";
 import { DataTable, type Column } from "@/components/data/DataTable";
 import type { Flow } from "@/lib/api";
+import { href } from "@/lib/router";
 import { bytes, dur, fullTime, rate, ts } from "@/lib/format";
 
 export const dest = (f: Flow) => (f.dst_ip.includes(":") ? `[${f.dst_ip}]:${f.dst_port}` : `${f.dst_ip}:${f.dst_port}`);
@@ -105,14 +107,30 @@ export function FlowsTable({
   target?: boolean;
   maxHeight?: string;
 }) {
-  const columns = useMemo(() => flowColumns({ device, target, now: Date.now() }), [device, target, flows]);
+  const now = useMemo(() => Date.now(), [flows]);
+  const columns = useMemo(() => flowColumns({ device, target, now }), [device, target, now]);
+  const detail = useFlowDetail(flows ?? [], now);
   return (
-    <DataTable
-      columns={columns}
-      rows={flows ?? []}
-      rowKey={(f) => f.id}
-      empty="No flows recorded."
-      maxHeight={maxHeight}
-    />
+    <>
+      <DataTable
+        columns={columns}
+        rows={flows ?? []}
+        rowKey={(f) => f.id}
+        empty="No flows recorded."
+        maxHeight={maxHeight}
+        onRowClick={detail.select}
+        selectedKey={detail.selectedKey}
+      />
+      {detail.panel}
+    </>
+  );
+}
+
+/** Card action that opens the Connections view with a search filled in. */
+export function AllFlowsLink({ query }: { query: string }) {
+  return (
+    <a href={href.connections(query)} className="rounded-[4px] px-1 text-[12px] text-ink-2 hover:text-ink hover:underline">
+      All connections
+    </a>
   );
 }

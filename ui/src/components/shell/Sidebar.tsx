@@ -1,4 +1,4 @@
-import { Activity, Globe, LayoutDashboard, MonitorSmartphone, PanelLeftClose, PanelLeftOpen, Radar } from "lucide-react";
+import { Activity, ArrowLeftRight, Globe, LayoutDashboard, MonitorSmartphone, PanelLeftClose, PanelLeftOpen, Radar } from "lucide-react";
 import { useSyncExternalStore, type ReactNode } from "react";
 import GlideMenu from "@/components/primitives/GlideMenu";
 import type { DevicesResp } from "@/lib/api";
@@ -13,6 +13,7 @@ const NAV: { view: View; also?: View; label: string; href: string; icon: ReactNo
   { view: "devices", also: "device", label: "Devices", href: href.devices, icon: <MonitorSmartphone size={15} />, key: "2" },
   { view: "domains", also: "domain", label: "Domains", href: href.domains, icon: <Globe size={15} />, key: "3" },
   { view: "live", label: "Live", href: href.live, icon: <Activity size={15} />, key: "4" },
+  { view: "connections", label: "Connections", href: href.connections(), icon: <ArrowLeftRight size={15} />, key: "5" },
 ];
 export const NAV_KEYS = Object.fromEntries(NAV.map((n) => [n.key, n.href]));
 

@@ -128,10 +128,19 @@ in a user unit it breaks ssh (root-owned config files appear owned by nobody).
   (`/api/domain?target=<domain-or-ip>&range=`): which devices contacted it.
 - **Live** (`/api/live`): open connections from memory, with rates, a
   throughput chart (sampled by the page while it is open) and current talkers.
+- **Connections** (`/api/flows?range=&state=open|closed|all&sort=date|bytes&q=&limit=`):
+  every recorded connection in the range, searched in the database. Search
+  words are ANDed; a plain word matches the device, domain, addresses or
+  outbound, and `key:value` tests one field: `device`, `domain`, `target`
+  (exact), `source`, `destination`, `port`, `network`, `protocol`, `inbound`,
+  `inbound.type`, `outbound`, `rule`, `user`. The Live filter takes the same
+  syntax. Clicking a row in any connection table opens its details (ID, match
+  rule, user, inbound type, IP version, chain). Like the routing split, this
+  reaches back only as far as `retention_days`.
 - `/api/status`: stream / resolver / conntrack health, plus the current total
   rates (`rate_down`, `rate_up`) and `open_all`.
 
-Navigation: `1`–`4` switch views, `⌘K`/`Ctrl K` or `/` opens the device and
+Navigation: `1`–`5` switch views, `⌘K`/`Ctrl K` or `/` opens the device and
 domain finder, `[` collapses the sidebar. The time range, theme and sidebar
 state are remembered in the browser.
 

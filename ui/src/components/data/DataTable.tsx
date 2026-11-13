@@ -29,6 +29,8 @@ export function DataTable<T>({
   maxHeight,
   pageSize = 100,
   className,
+  onRowClick,
+  selectedKey,
 }: {
   columns: Column<T>[];
   rows: T[];
@@ -39,6 +41,9 @@ export function DataTable<T>({
   maxHeight?: string;
   pageSize?: number;
   className?: string;
+  /** makes rows activatable (click, Enter); clicks on links inside a row keep working */
+  onRowClick?: (row: T) => void;
+  selectedKey?: string | null;
 }) {
   const [sort, setSort] = useState<Sort | null>(defaultSort ?? null);
   const [shown, setShown] = useState(pageSize);
@@ -104,12 +109,29 @@ export function DataTable<T>({
             </tr>
           ) : (
             visible.map((row) => (
-              <tr key={rowKey(row)} className="group/row">
+              <tr
+                key={rowKey(row)}
+                className={cn("group/row", onRowClick && "cursor-pointer outline-offset-[-2px]")}
+                tabIndex={onRowClick ? 0 : undefined}
+                aria-selected={onRowClick ? rowKey(row) === selectedKey : undefined}
+                onClick={
+                  onRowClick &&
+                  ((e) => {
+                    if (!(e.target as HTMLElement).closest("a,button,input")) onRowClick(row);
+                  })
+                }
+                onKeyDown={
+                  onRowClick &&
+                  ((e) => {
+                    if (e.key === "Enter" && e.target === e.currentTarget) onRowClick(row);
+                  })
+                }
+              >
                 {columns.map((c) => (
                   <td
                     key={c.key}
                     className={cn(
-                      "h-[30px] border-b border-line-soft px-2.5 whitespace-nowrap text-ink group-last/row:border-b-0 group-hover/row:bg-hover first:pl-3 last:pr-3",
+                      "h-[30px] border-b border-line-soft px-2.5 whitespace-nowrap text-ink group-last/row:border-b-0 group-hover/row:bg-hover group-aria-selected/row:bg-hover-2 first:pl-3 last:pr-3",
                       c.num && "text-right",
                       c.className,
                     )}

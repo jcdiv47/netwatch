@@ -5,10 +5,12 @@ import { RateChart } from "@/components/charts/RateChart";
 import { SplitBar } from "@/components/data/Bars";
 import { Chips, DeviceLink, FilterInput, type Chip } from "@/components/data/Bits";
 import { Card, ErrorNote } from "@/components/data/Card";
+import { useFlowDetail } from "@/components/data/FlowDetail";
 import { DataTable, type Column } from "@/components/data/DataTable";
 import { flowColumns } from "@/components/data/FlowsTable";
 import { StatStrip } from "@/components/data/Stat";
 import type { Flow, LiveResp } from "@/lib/api";
+import { flowMatcher, SEARCH_HELP } from "@/lib/flowSearch";
 import { count, rate } from "@/lib/format";
 import { usePulse } from "@/lib/store";
 import { useApi } from "@/lib/useApi";
@@ -25,14 +27,8 @@ export function Live() {
 
   const flows = data?.flows ?? [];
   const rows = useMemo(() => {
-    const words = query.toLowerCase().split(/\s+/).filter(Boolean);
-    return flows.filter(
-      (f) =>
-        (source === "all" || f.source === source) &&
-        words.every((w) =>
-          [f.device_name, f.target, f.dst_ip, f.src_ip, f.device_key].some((s) => s?.toLowerCase().includes(w)),
-        ),
-    );
+    const match = flowMatcher(query);
+    return flows.filter((f) => (source === "all" || f.source === source) && match(f));
   }, [flows, query, source]);
 
   const talkers = useMemo(() => {
@@ -59,6 +55,8 @@ export function Live() {
     ],
     [talkMax],
   );
+
+  const detail = useFlowDetail(flows, data?.now ?? Date.now(), true);
 
   if (!data) return error ? <ErrorNote error={error} /> : null;
 
@@ -108,7 +106,8 @@ export function Live() {
                 setQuery(v);
                 sessionStorage.setItem("nw.lf", v);
               }}
-              placeholder="Filter device, domain, IP"
+              placeholder="Filter · device: outbound: network: …"
+              title={SEARCH_HELP}
               className="ml-2"
             />
             <Button variant="secondary" size="xs" className="ml-1" onClick={() => setPaused((p) => !p)} aria-pressed={paused}>
@@ -123,9 +122,12 @@ export function Live() {
           rows={rows}
           rowKey={(f) => f.id}
           defaultSort={{ key: "rate_down", dir: -1 }}
+          onRowClick={detail.select}
+          selectedKey={detail.selectedKey}
           empty={flows.length ? "No connection matches the filter." : "No open connections."}
         />
       </Card>
+      {detail.panel}
     </div>
   );
 }

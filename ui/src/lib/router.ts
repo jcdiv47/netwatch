@@ -1,9 +1,9 @@
 import { useSyncExternalStore } from "react";
 
-export type View = "overview" | "devices" | "device" | "domains" | "domain" | "live";
+export type View = "overview" | "devices" | "device" | "domains" | "domain" | "live" | "connections";
 export type Route = { view: View; arg: string };
 
-const VIEWS: View[] = ["overview", "devices", "device", "domains", "domain", "live"];
+const VIEWS: View[] = ["overview", "devices", "device", "domains", "domain", "live", "connections"];
 
 function parse(hash: string): Route {
   const [head = "", ...rest] = hash.replace(/^#\/?/, "").split("/");
@@ -38,6 +38,8 @@ export const href = {
   devices: "#/devices",
   domains: "#/domains",
   live: "#/live",
+  /** optional search, e.g. "device:aa:bb:cc:dd:ee:ff" */
+  connections: (query = "") => (query ? `#/connections/${encodeURIComponent(query)}` : "#/connections"),
   device: (key: string) => `#/device/${encodeURIComponent(key)}`,
   domain: (target: string) => `#/domain/${encodeURIComponent(target)}`,
 };

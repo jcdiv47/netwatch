@@ -46,8 +46,12 @@ export type Flow = {
   network: string;
   protocol: string;
   inbound: string;
+  inbound_type: string;
   outbound: string;
+  rule: string;
   chain: string;
+  user: string;
+  ip_version: number;
   created_at: number;
   closed_at: number | null;
   up: number;
@@ -101,6 +105,8 @@ export type DomainResp = {
   series: Point[] | null;
   recent_flows: Flow[] | null;
 };
+
+export type FlowsResp = { range: string; now: number; flows: Flow[]; more: boolean; limit: number };
 
 export type LiveResp = { now: number; flows: Flow[] | null };
 

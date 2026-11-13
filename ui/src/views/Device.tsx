@@ -6,7 +6,7 @@ import { SplitBar } from "@/components/data/Bars";
 import { KindPill, Mono, TargetLink } from "@/components/data/Bits";
 import { Card, ErrorNote } from "@/components/data/Card";
 import { DataTable, type Column } from "@/components/data/DataTable";
-import { FlowsTable } from "@/components/data/FlowsTable";
+import { AllFlowsLink, FlowsTable } from "@/components/data/FlowsTable";
 import { StatStrip } from "@/components/data/Stat";
 import { setDeviceName, type DeviceResp, type TargetStat } from "@/lib/api";
 import { ago, bytes, count, fullTime, ts } from "@/lib/format";
@@ -172,7 +172,12 @@ export function Device({ deviceKey, onName }: { deviceKey: string; onName: (name
         </Card>
       </div>
 
-      <Card title="Recent flows" meta={`latest ${(data.recent_flows ?? []).length}`} flush>
+      <Card
+        title="Recent flows"
+        meta={`latest ${(data.recent_flows ?? []).length}`}
+        actions={<AllFlowsLink query={`device:${deviceKey}`} />}
+        flush
+      >
         <FlowsTable flows={data.recent_flows} device={false} />
       </Card>
     </div>

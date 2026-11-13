@@ -71,7 +71,9 @@ export function FilterInput({
   placeholder,
   className,
   autoFocus,
+  title,
 }: {
+  title?: string;
   value: string;
   onChange: (v: string) => void;
   placeholder: string;
@@ -80,6 +82,7 @@ export function FilterInput({
 }) {
   return (
     <label
+      title={title}
       className={cn(
         "flex h-7 w-56 cursor-text! items-center gap-1.5 rounded-control bg-field px-2 shadow-hairline focus-within:shadow-[0_0_0_1.5px_var(--accent)]",
         className,
