@@ -11,6 +11,32 @@ export function bytes(n: number | null | undefined): string {
 
 export const rate = (n: number | null | undefined) => bytes(n) + "/s";
 
+const UNITS = ["B", "KB", "MB", "GB", "TB"];
+
+/**
+ * A value axis from 0 to just past `max`: round steps, every tick in the same
+ * unit ("0 · 5 · 10 · 15 GB" rather than "4.50 MB · 900 KB").
+ */
+export function niceScale(max: number, suffix = "", steps = 4): { ticks: number[]; format: (v: number) => string } {
+  if (!(max > 0)) return { ticks: [0], format: () => "0" };
+  const u = Math.max(0, Math.min(UNITS.length - 1, Math.floor(Math.log(max) / Math.log(1000))));
+  const base = 1000 ** u;
+  const raw = max / base / steps;
+  const mag = 10 ** Math.floor(Math.log10(raw));
+  const step = ([1, 2, 2.5, 5, 10].find((m) => m * mag >= raw) ?? 10) * mag;
+  return {
+    // as many steps as it takes to clear the maximum, and no more
+    ticks: Array.from({ length: Math.max(2, Math.ceil(max / base / step - 1e-9)) + 1 }, (_, i) => i * step * base),
+    format: (v) => (v === 0 ? "0" : `${+(v / base).toFixed(2)} ${UNITS[u]}${suffix}`),
+  };
+}
+
+/** Clock label for an axis: "8 PM" on the hour, "8:30 PM" otherwise. */
+export function clockLabel(ms: number): string {
+  const d = new Date(ms);
+  return d.toLocaleTimeString([], d.getMinutes() === 0 ? { hour: "numeric" } : { hour: "numeric", minute: "2-digit" });
+}
+
 export const count = (n: number | null | undefined) => (Number(n) || 0).toLocaleString();
 
 export function ago(ms: number | null | undefined, now = Date.now()): string {
@@ -39,7 +65,9 @@ export function ts(ms: number | null | undefined): string {
     : d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
-export const fullTime = (ms: number) => new Date(ms).toLocaleString();
+/** Date and time to the second, in the same shape as the rest of the app. */
+export const fullTime = (ms: number) =>
+  new Date(ms).toLocaleString([], { month: "short", day: "numeric", year: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" });
 
 /** Axis tick for a bucket starting at t (unix s). */
 export function axisLabel(t: number, bucket: number): string {

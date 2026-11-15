@@ -655,18 +655,24 @@ const CustomBar = (props: CustomBarProps) => {
   });
   const cursorStyle = isClickable || enableHoverHighlight ? { cursor: "pointer" } : undefined;
 
-  // Stripped bars round only their top corners; every other variant rounds all four
-  const radius: RectRadius = isStripped ? [barRadius, barRadius, 0, 0] : barRadius;
+  // netwatch patch: upstream rounds all four corners and leaves a 3px gap under
+  // every segment, which turns a small stacked segment into a pill floating
+  // above its column. Segments now round their top corners only, sit 1px
+  // apart, and never draw thinner than 2px so a small value stays visible.
+  const radius: RectRadius = [barRadius, barRadius, 0, 0];
+  const SEGMENT_GAP = 1;
+  const drawn = height && height > 0 ? Math.max(2, height - SEGMENT_GAP) : 0;
+  const drawnY = (y ?? 0) + Math.max(0, (height ?? 0) - SEGMENT_GAP) - drawn;
 
   // The visible, painted bar — plus the stripped variant's solid top strip
   const visibleBar = (
     <>
       <Rectangle
         x={x}
-        y={y}
+        y={drawnY}
         width={width}
         opacity={fillOpacity}
-        height={Math.max(0, height - 3)}
+        height={drawn}
         radius={radius}
         fill={fill}
         filter={filter}

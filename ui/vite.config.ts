@@ -19,6 +19,7 @@ export default defineConfig({
     chunkSizeWarningLimit: 1200,
   },
   server: {
-    proxy: { "/api": "http://127.0.0.1:8377" },
+    // NETWATCH_DEV_API points the dev server at a netwatch that listens elsewhere.
+    proxy: { "/api": process.env.NETWATCH_DEV_API ?? "http://127.0.0.1:8377" },
   },
 });

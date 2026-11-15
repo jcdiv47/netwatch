@@ -38,6 +38,8 @@ export const href = {
   devices: "#/devices",
   domains: "#/domains",
   live: "#/live",
+  /** the Live view with its filter filled in */
+  liveFor: (query: string) => `#/live/${encodeURIComponent(query)}`,
   /** optional search, e.g. "device:aa:bb:cc:dd:ee:ff" */
   connections: (query = "") => (query ? `#/connections/${encodeURIComponent(query)}` : "#/connections"),
   device: (key: string) => `#/device/${encodeURIComponent(key)}`,

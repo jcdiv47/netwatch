@@ -36,6 +36,7 @@ is only needed to change the UI:
 cd ui
 npm install
 npm run dev      # http://localhost:5173, /api proxied to a running netwatch on :8377
+                 # (NETWATCH_DEV_API=http://host:8377 npm run dev if it listens elsewhere)
 npm run build    # typecheck, then rewrite ../internal/web/static; rebuild the Go binary after
 ```
 
@@ -140,9 +141,26 @@ in a user unit it breaks ssh (root-owned config files appear owned by nobody).
 - `/api/status`: stream / resolver / conntrack health, plus the current total
   rates (`rate_down`, `rate_up`) and `open_all`.
 
-Navigation: `1`–`5` switch views, `⌘K`/`Ctrl K` or `/` opens the device and
-domain finder, `[` collapses the sidebar. The time range, theme and sidebar
-state are remembered in the browser.
+Navigation: `1`–`5` switch views, `⌘K`/`Ctrl K` or `/` opens the palette
+(jump to a view, device or destination; set the time range or theme), `[`
+collapses the sidebar. Rows in the device and destination tables, the Sankey's
+nodes and the routing split's rows are all links: a device or destination opens
+its page, a route opens the Connections view filtered to it. Clicking a
+connection docks its details beside the table. The time range, theme and
+sidebar state are remembered in the browser; motion is reduced when the OS asks
+for it.
+
+Phones: below 768px the sidebar becomes a bottom tab bar and the top bar keeps
+to title, live rate and search (the theme switch moves into the palette); below
+640px every table becomes a list of two-line rows with a sort control, and a
+connection's details open as a bottom sheet. The UI ships a web-app manifest
+and touch icon, so it can be added to a home screen.
+
+Color: blue and orange mean download and upload everywhere and nothing else.
+Devices in the Sankey take their identity colors from
+`ui/src/lib/palette.ts`, which leaves those two hues out; the routing split
+uses shades of the ink, solid for traffic that left through a sing-box outbound
+and hatched for traffic that bypassed it.
 
 Ranges: `6h 24h 7d 30d 90d 365d`. Totals and charts come from the hourly
 rollups, so the 6h/24h ranges start at the top of the hour containing the

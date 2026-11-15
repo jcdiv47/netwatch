@@ -36,6 +36,7 @@ import {
 } from "@/registry/ui/recharts-chart";
 import { ChartBackground, type BackgroundVariant } from "@/registry/ui/recharts-background";
 import { motion } from "motion/react";
+import { cn } from "@/lib/utils";
 
 // Constants
 const LOADING_ANIMATION_DURATION = 2000; // full loading cycle duration in milliseconds
@@ -203,6 +204,8 @@ export function EvilSankeyChart({
 type NodeProps = {
   radius?: number; // corner radius of node rectangles in pixels
   isClickable?: boolean; // lets nodes be selected by clicking them
+  selectOnHover?: boolean; // netwatch patch: hovering a node (or its label) highlights its links
+  onNodeClick?: (nodeName: string) => void; // netwatch patch: a click opens the node instead of selecting it
   children?: ReactNode; // optional <NodeLabel /> composition
 };
 
@@ -351,10 +354,24 @@ const SankeyNode = ({ x, y, width, height, payload, nodeConfig }: SankeyNodeRend
   const isHighlighted = isNodeConnected(data, selectedNode, nodeName);
   const hasConfigColor = nodeName in config;
   const configLabel = config[nodeName]?.label ?? nodeName;
-  const dimmed = isClickable && !isHighlighted;
+  const dimmed = (isClickable || (nodeConfig?.selectOnHover ?? false)) && !isHighlighted;
 
   const valueFormatter = label?.valueFormatter ?? ((value: number) => value.toLocaleString());
   const showValues = label?.showValues ?? false;
+
+  // netwatch patch: one set of pointer handlers shared by the node and its
+  // outside label, so the whole row is a target.
+  const selectOnHover = nodeConfig?.selectOnHover ?? false;
+  const onNodeClick = nodeConfig?.onNodeClick;
+  const interactive = isClickable || !!onNodeClick;
+  const pointerProps = {
+    onMouseEnter: selectOnHover ? () => selectNode(nodeName) : undefined,
+    onMouseLeave: selectOnHover ? () => selectNode(null) : undefined,
+    onClick: () => {
+      if (onNodeClick) onNodeClick(nodeName);
+      else if (isClickable) selectNode(selectedNode === nodeName ? null : nodeName);
+    },
+  };
 
   const labelX = x + width / 2;
   const labelY = showValues ? y + height / 2 - 8 : y + height / 2;
@@ -372,13 +389,10 @@ const SankeyNode = ({ x, y, width, height, payload, nodeConfig }: SankeyNodeRend
         rx={radius}
         ry={radius}
         fill={hasConfigColor ? `url(#${chartId}-sankey-colors-${nodeName})` : "currentColor"}
-        fillOpacity={dimmed ? 0.15 : 0.9}
+        fillOpacity={dimmed ? 0.2 : 1}
         className="transition-opacity duration-200"
-        style={isClickable ? { cursor: "pointer" } : undefined}
-        onClick={() => {
-          if (!isClickable) return;
-          selectNode(selectedNode === nodeName ? null : nodeName);
-        }}
+        style={interactive ? { cursor: "pointer" } : undefined}
+        {...pointerProps}
       />
       {label?.position === "inside" && (
         <>
@@ -453,14 +467,33 @@ const SankeyNode = ({ x, y, width, height, payload, nodeConfig }: SankeyNodeRend
                 textAnchor={anchor}
                 dominantBaseline="middle"
                 opacity={dimmed ? 0.35 : 1}
-                className="fill-foreground text-xs transition-opacity duration-200"
-                style={{ pointerEvents: "none" }}
+                className={cn(
+                  "fill-foreground text-xs transition-opacity duration-200 hover:underline",
+                  // netwatch patch: MAC and IP labels wear the mono face, as everywhere else
+                  typeof configLabel === "string" && /^[0-9a-f:.…]+$/i.test(configLabel) && /\d/.test(configLabel) && "font-mono text-[11px]",
+                )}
+                style={interactive ? { cursor: "pointer" } : { pointerEvents: "none" }}
+                {...(interactive ? pointerProps : {})}
               >
                 {configLabel}
                 {showValues && label.inlineValues && (
-                  <tspan dx={6} opacity={0.55} className="tabular-nums">
-                    {valueFormatter(nodeValue)}
-                  </tspan>
+                  // netwatch patch: number + small unit, the same figure style as the tables
+                  (() => {
+                    const text = valueFormatter(nodeValue);
+                    const cut = text.lastIndexOf(" ");
+                    return (
+                      <>
+                        <tspan dx={7} opacity={0.72} className="font-mono text-[11px] font-normal">
+                          {cut < 0 ? text : text.slice(0, cut)}
+                        </tspan>
+                        {cut >= 0 && (
+                          <tspan dx={2} opacity={0.5} className="font-mono text-[9.5px] font-normal">
+                            {text.slice(cut + 1)}
+                          </tspan>
+                        )}
+                      </>
+                    );
+                  })()
                 )}
               </text>
               {stacked && (
@@ -544,9 +577,11 @@ const SankeyLink = ({
       <path
         d={linkAreaPath}
         fill={getLinkFill(variant, chartId, index, config, sourceName, targetName)}
-        fillOpacity={isConnected ? 0.4 : 0.1}
+        // netwatch patch: resting/hover opacity comes from the theme (index.css)
+        style={{ fillOpacity: selectedNode === null ? "var(--link-rest)" : isConnected ? "var(--link-on)" : "0.05" }}
         stroke={
-          selectedNode !== null && isConnected ? `url(#${chartId}-link-stroke-${index})` : "none"
+          // netwatch patch: a surface-colored hairline keeps crossing ribbons apart
+          selectedNode === null ? "var(--surface)" : isConnected ? `url(#${chartId}-link-stroke-${index})` : "none"
         }
         strokeWidth={1}
         strokeOpacity={1}

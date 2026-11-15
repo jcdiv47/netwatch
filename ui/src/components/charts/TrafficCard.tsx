@@ -17,7 +17,7 @@ export function TrafficCard({
   meta,
   title = "Traffic over time",
   className,
-  height = "h-56",
+  height = "h-60",
 }: {
   series: Point[] | null;
   bucket: number;

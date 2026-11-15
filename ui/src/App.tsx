@@ -1,6 +1,7 @@
+import { AnimatePresence } from "motion/react";
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { CommandPalette } from "@/components/shell/CommandPalette";
-import { NAV_KEYS, Sidebar } from "@/components/shell/Sidebar";
+import { MobileNav, NAV_KEYS, Sidebar } from "@/components/shell/Sidebar";
 import { TopBar, type Crumb } from "@/components/shell/TopBar";
 import { go, href, useRoute } from "@/lib/router";
 import { sidebarStore } from "@/lib/store";
@@ -73,8 +74,8 @@ export function App() {
       <Sidebar />
       <div className="flex min-w-0 flex-1 flex-col">
         <TopBar crumbs={crumbs} showRange={route.view !== "live"} onSearch={() => setPalette(true)} />
-        <main id="main" className="min-h-0 flex-1 overflow-y-auto">
-          <div className="mx-auto max-w-[1680px] p-3 lg:p-4">
+        <main id="main" className="page-glow min-h-0 flex-1 overflow-y-auto">
+          <div className="mx-auto max-w-[1680px] p-3 lg:p-5">
             {route.view === "overview" && <Overview dark={dark} />}
             {route.view === "devices" && <Devices />}
             {route.view === "device" && (
@@ -82,12 +83,13 @@ export function App() {
             )}
             {route.view === "domains" && <Domains />}
             {route.view === "domain" && <Domain key={route.arg} target={route.arg} />}
-            {route.view === "live" && <Live />}
+            {route.view === "live" && <Live key={route.arg} initialQuery={route.arg} />}
             {route.view === "connections" && <Connections key={route.arg} initialQuery={route.arg} />}
           </div>
         </main>
+        <MobileNav />
       </div>
-      {palette && <CommandPalette onClose={() => setPalette(false)} />}
+      <AnimatePresence>{palette && <CommandPalette key="palette" onClose={() => setPalette(false)} />}</AnimatePresence>
     </div>
   );
 }
