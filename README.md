@@ -1,104 +1,156 @@
 # netwatch
 
-Home-network traffic monitor: records which LAN device talks to which
-domains, keeps history in SQLite, and serves a small web UI + JSON API.
-Single Go binary, no external services.
+**Self-hosted homelab network traffic monitor** that records which LAN devices talk to which domains, stores history in SQLite, and serves a fast, embedded web dashboard and JSON API.
 
-Data sources (all read-only):
+Built as a single, zero-dependency Go binary with an embedded React UI and pure-Go SQLite (`modernc.org/sqlite`, no cgo) — no external database, message broker, or CDN required.
 
-1. **sing-box connection stream** on the router (ImmortalWrt + momo):
-   `daemon.StartedService/SubscribeConnections` on the sing-box API
-   (`192.168.2.1:9090`, gRPC h2c, `authorization: Bearer <secret>`). This
-   gives every proxied/routed connection with its sniffed domain and byte
-   totals.
-2. **Router state over ssh** every ~45 s: `/tmp/dhcp.leases`,
-   `uci show dhcp` (static hosts), `ip neigh` / `ip -6 neigh`,
-   `ip -o addr`, `/tmp/hosts/*`, `ip rule`. Used to map source IPs to
-   devices by MAC.
-3. **Conntrack** (`/proc/net/nf_conntrack` over ssh every 20 s) for traffic
-   sing-box cannot see (see below).
+---
 
-## Build
+## Highlights
+
+- **Per-device & per-domain visibility** — Tracks traffic by MAC address across IPv4 and rotated IPv6 privacy addresses, with custom friendly names and first-contact feeds.
+- **Read-only router collection** — Connects to your router's `sing-box` gRPC API for sniffed domains (TLS SNI / HTTP Host / QUIC), rules, and outbounds, and supplements it via SSH with `nf_conntrack` for traffic that bypasses the tunnel.
+- **Single-binary deployment** — Production web assets are embedded in the binary and served under a strict Content Security Policy (`default-src 'self'`).
+- **Accurate, restart-safe accounting** — Uses absolute per-flow byte totals and hourly rollup watermarks so restarts, reconnects, and replayed events never double-count.
+- **Responsive dashboard + PWA** — Includes Overview (Sankey flow diagram, traffic timeline, routing split, first-contact feed), Devices (with sparklines), Domains, Live connections, and a searchable Connections log, with dark/light themes, keyboard navigation, and a mobile layout with home-screen manifest.
+
+---
+
+## How It Works
+
+```text
+Router (OpenWrt / ImmortalWrt + sing-box)
+  ├── sing-box gRPC API (SubscribeConnections) ──► Collector ─► Tracker ─┐
+  ├── SSH (DHCP leases, UCI, ip neigh/addr/rule) ─► Resolver ────────────┼─► SQLite (WAL) ──► Web UI & JSON API
+  └── SSH (/proc/net/nf_conntrack) ───────────────► Conntrack Poller ────┘    (flows + hourly rollups)
+```
+
+All collection is **strictly read-only**:
+
+1. **sing-box connection stream** — Subscribes to `daemon.StartedService/SubscribeConnections` over gRPC (`h2c`, `authorization: Bearer <secret>`). Captures every proxied/routed flow with sniffed domain, protocol, match rule, outbound chain, and byte totals.
+2. **Router state over SSH** (default every `45s`, multiplexed with `ControlMaster`) — Reads `/tmp/dhcp.leases`, `uci -q show dhcp`, `ip -4/-6 neigh show`, `ip -o addr show`, `/tmp/hosts/*`, and `ip rule show` to resolve LAN IPs to MAC addresses and hostnames, and to learn the router's LAN prefixes and tun `fwmark`.
+3. **Conntrack polling over SSH** (default every `20s`, optional) — Reads `/proc/net/nf_conntrack` to capture traffic that `sing-box` does not handle (tun-excluded hosts/prefixes, private ranges, port-forwards, inbound routed IPv6, and hairpin NAT).
+
+---
+
+## Prerequisites
+
+- **Router**: OpenWrt / ImmortalWrt (or similar Linux router) running `sing-box` with the gRPC `StartedService` API exposed to your LAN (e.g., ImmortalWrt + `momo`).
+- **SSH access**: Passwordless key authentication (`BatchMode=yes`) to the router, with the router's host key already present in `~/.ssh/known_hosts`.
+- **Conntrack byte counters** *(optional, for non-sing-box traffic)*: `net.netfilter.nf_conntrack_acct=1` on the router (enabled by default on ImmortalWrt; without it, conntrack flows are recorded with 0 bytes).
+- **Build host**: Go toolchain matching `go.mod` (`1.27+`). Node.js is **not** required to build or run `netwatch` unless you edit the frontend.
+
+---
+
+## Quick Start
+
+### 1. Build
 
 ```sh
+git clone https://github.com/jcdiv47/netwatch.git
+cd netwatch
 go build -o netwatch ./cmd/netwatch
-go test ./...
 ```
 
-Go toolchain as pinned in go.mod (1.27). Pure-Go SQLite (`modernc.org/sqlite`), no cgo.
+### 2. Configure
 
-The UI is a React app in `ui/` whose production build is committed to
-`internal/web/static/` and embedded in the binary, so `go build` alone still
-produces a working netwatch (no node needed, nothing loaded from a CDN). Node
-is only needed to change the UI:
+If you run ImmortalWrt with `momo`, `init-config` can fetch the API secret from the router over SSH and write `~/.config/netwatch/config.toml` with mode `0600` (without printing the secret):
 
 ```sh
-cd ui
-npm install
-npm run dev      # http://localhost:5173, /api proxied to a running netwatch on :8377
-                 # (NETWATCH_DEV_API=http://host:8377 npm run dev if it listens elsewhere)
-npm run build    # typecheck, then rewrite ../internal/web/static; rebuild the Go binary after
+# Override default router (root@192.168.2.1) if needed:
+NETWATCH_ROUTER=root@192.168.1.1 ./netwatch init-config
 ```
 
-UI stack: Vite + React + Tailwind v4, with
-[Beautiful UI](https://www.beautifului.dev/)'s foundation (tokens, shadows,
-radii, motion) and atoms, and [EvilCharts](https://evilcharts.com/)
-(Recharts) for the charts. Both are copy-in libraries; their sources live in
-`ui/src/styles/foundation.css`, `ui/src/components/{atoms,primitives}/` and
-`ui/src/registry/`. Local changes to them are marked `netwatch patch`; the one
-that matters is that EvilCharts no longer injects a `<style>` element, because
-netwatch serves the UI with `style-src 'self'`.
-
-The gRPC client is generated from a trimmed copy of sing-box's
-`daemon/started_service.proto` in `proto/` (only `SubscribeConnections` and
-its messages; package/service names unchanged so the method path matches).
-To regenerate:
+For other `sing-box` setups, create `~/.config/netwatch/config.toml` manually and restrict permissions to `0600` (required whenever the file contains `secret`):
 
 ```sh
-GOBIN=/tmp/nwbin go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
-GOBIN=/tmp/nwbin go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
-PATH=/tmp/nwbin:$PATH protoc -I proto --go_out=internal/pb --go_opt=paths=source_relative \
-  --go-grpc_out=internal/pb --go-grpc_opt=paths=source_relative proto/started_service.proto
+mkdir -p ~/.config/netwatch
+chmod 700 ~/.config/netwatch
+cat <<'EOF' > ~/.config/netwatch/config.toml
+router = "root@192.168.1.1"
+api    = "192.168.1.1:9090"
+secret = "your-sing-box-api-secret"
+listen = "127.0.0.1:8377"
+EOF
+chmod 600 ~/.config/netwatch/config.toml
 ```
 
-## Configure
+### 3. Run
 
 ```sh
-./netwatch init-config     # writes ~/.config/netwatch/config.toml (0600)
+./netwatch
 ```
 
-`init-config` reads the API secret from the router
-(`jsonfilter -i /etc/momo/run/config.json -e '@.services[0].secret'`) and
-writes it into the config file without printing it. netwatch refuses to start
-if a config file containing a secret is group/world readable.
+Open <http://127.0.0.1:8377> in your browser.
 
-Keys (all optional except `secret`):
+---
 
-| key | default | |
-|---|---|---|
-| `router` | `root@192.168.2.1` | ssh target (key auth, BatchMode) |
-| `ssh_options` | `[]` | extra ssh args |
-| `api` | `192.168.2.1:9090` | sing-box API |
-| `secret` | — | API bearer secret |
-| `listen` | `127.0.0.1:8377` | web UI / API |
-| `db` | `~/.local/share/netwatch/netwatch.db` | |
-| `retention_days` | 30 | raw flows |
-| `rollup_retention_days` | 730 | hourly rollups, IP history, first-seen |
-| `stream_interval` | `2s` | sing-box update tick |
-| `checkpoint_interval` | `60s` | how often open flows' bytes are persisted |
-| `resolve_interval` | `45s` | router device refresh |
-| `conntrack` / `conntrack_interval` | `true` / `20s` | |
-| `lan_interfaces` / `tun_interface` | `["br-lan"]` / `singbox_tun` | |
+## Configuration
 
-Env overrides: `NETWATCH_CONFIG`, `NETWATCH_ROUTER`, `NETWATCH_API`,
-`NETWATCH_SECRET`, `NETWATCH_LISTEN`, `NETWATCH_DB`,
-`NETWATCH_RETENTION_DAYS`, `NETWATCH_CONNTRACK`.
+`netwatch` loads configuration from `~/.config/netwatch/config.toml` (override with `-config <path>` or `NETWATCH_CONFIG`). Environment variables take precedence over the TOML file.
 
-## Run / install
+> **Security note:** `netwatch` refuses to start if a config file containing `secret` is readable by group or others (`chmod 600`). By default, the web server binds to `127.0.0.1:8377` with no built-in authentication — if you want remote access across your homelab, place it behind a reverse proxy with authentication or access it over Tailscale / WireGuard.
 
-Foreground: `./netwatch` then open <http://127.0.0.1:8377>.
+### Full `config.toml` Reference
 
-As a user service:
+```toml
+# SSH target used for read-only router queries (leases, neighbours, conntrack).
+router = "root@192.168.2.1"
+ssh_options = []
+
+# sing-box gRPC API address and bearer secret.
+api = "192.168.2.1:9090"
+secret = "..."
+
+# Web UI / JSON API bind address and SQLite database path.
+listen = "127.0.0.1:8377"
+db = "~/.local/share/netwatch/netwatch.db"
+
+# Retention windows (pruned hourly).
+retention_days = 30           # raw flows
+rollup_retention_days = 730   # hourly rollups, IP->MAC history, first-seen records
+
+# Polling & persistence intervals.
+stream_interval = "2s"        # sing-box SubscribeConnections tick
+checkpoint_interval = "60s"   # how often open flows' bytes are persisted
+resolve_interval = "45s"      # router device & interface refresh
+
+# Record flows sing-box cannot see from /proc/net/nf_conntrack.
+conntrack = true
+conntrack_interval = "20s"
+
+# Router interface names used for LAN/tun classification.
+lan_interfaces = ["br-lan"]
+tun_interface = "singbox_tun"
+```
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `router` | `root@192.168.2.1` | SSH target (`BatchMode=yes`, key auth) |
+| `ssh_options` | `[]` | Extra arguments passed to `ssh` (e.g. `["-i", "/path/to/key", "-p", "2222"]`) |
+| `api` | `192.168.2.1:9090` | sing-box gRPC API host:port |
+| `secret` | *(required)* | sing-box API bearer token |
+| `listen` | `127.0.0.1:8377` | HTTP listen address for Web UI & API |
+| `db` | `~/.local/share/netwatch/netwatch.db` | SQLite database path (respects `XDG_DATA_HOME`) |
+| `retention_days` | `30` | Days to keep closed raw flow rows |
+| `rollup_retention_days` | `730` | Days to keep hourly rollups, IP history, and first-seen targets |
+| `stream_interval` | `2s` | `sing-box` stream update interval |
+| `checkpoint_interval` | `60s` | How often long-lived open flows are checkpointed to SQLite |
+| `resolve_interval` | `45s` | How often router leases/neighbours/addresses are refreshed |
+| `conntrack` | `true` | Enable `/proc/net/nf_conntrack` polling |
+| `conntrack_interval` | `20s` | Conntrack polling interval |
+| `lan_interfaces` | `["br-lan"]` | Router LAN bridge/interface names |
+| `tun_interface` | `singbox_tun` | Router `sing-box` tun interface name |
+
+### Environment Overrides
+
+`NETWATCH_CONFIG`, `NETWATCH_ROUTER`, `NETWATCH_API`, `NETWATCH_SECRET`, `NETWATCH_LISTEN`, `NETWATCH_DB`, `NETWATCH_RETENTION_DAYS`, `NETWATCH_CONNTRACK` (`1`/`true` or `0`/`false`).
+
+---
+
+## Deploying with systemd
+
+A user service unit is included in [`netwatch.service`](./netwatch.service):
 
 ```sh
 install -Dm755 netwatch ~/.local/bin/netwatch
@@ -109,124 +161,178 @@ systemctl --user enable --now netwatch
 journalctl --user -u netwatch -f
 ```
 
-The ssh client needs the router key usable non-interactively and the router
-already in `known_hosts`. The unit has no filesystem sandboxing on purpose:
-in a user unit it breaks ssh (root-owned config files appear owned by nobody).
+On a headless homelab server, enable lingering so the user service starts at boot and keeps running after you log out:
 
-## UI / API
+```sh
+loginctl enable-linger "$USER"
+```
 
-- **Overview** (`/api/overview?range=24h`): network totals, traffic over time,
-  how traffic left the router (sing-box outbound or conntrack bypass class),
-  top devices → top destinations, first-contact feed, top devices and
-  destinations. The routing split reads raw flows, so it reaches back only as
-  far as `retention_days`.
-- **Devices** (`/api/devices?range=24h[&all=1]`): totals per device, with a
-  per-device trend (`spark`, aligned to `buckets`).
-- **Device** (`/api/device?key=<mac>&range=7d`): top domains, traffic chart,
-  recent flows, destinations first seen in the range, IP addresses seen.
-  Friendly name: `POST /api/device/name {"key":..,"name":..}` (JSON only).
-- **Domains** (`/api/domains?range=&q=`), **Domain**
-  (`/api/domain?target=<domain-or-ip>&range=`): which devices contacted it.
-- **Live** (`/api/live`): open connections from memory, with rates, a
-  throughput chart (sampled by the page while it is open) and current talkers.
-- **Connections** (`/api/flows?range=&state=open|closed|all&sort=date|bytes&q=&limit=`):
-  every recorded connection in the range, searched in the database. Search
-  words are ANDed; a plain word matches the device, domain, addresses or
-  outbound, and `key:value` tests one field: `device`, `domain`, `target`
-  (exact), `source`, `destination`, `port`, `network`, `protocol`, `inbound`,
-  `inbound.type`, `outbound`, `rule`, `user`. The Live filter takes the same
-  syntax. Clicking a row in any connection table opens its details (ID, match
-  rule, user, inbound type, IP version, chain). Like the routing split, this
-  reaches back only as far as `retention_days`.
-- `/api/status`: stream / resolver / conntrack health, plus the current total
-  rates (`rate_down`, `rate_up`) and `open_all`.
+**SSH & sandboxing notes:**
+- The SSH key used for the router must be usable non-interactively (an unencrypted dedicated key or an `ssh-agent` socket exported to the systemd user manager), and the router must already be in `~/.ssh/known_hosts`.
+- Filesystem sandboxing directives (`ProtectSystem`, `PrivateTmp`, etc.) are intentionally omitted from the user unit: in a user unit they run inside a user namespace where root-owned `/etc/ssh/ssh_config.d/*` files appear owned by `nobody`, causing OpenSSH to reject them.
 
-Navigation: `1`–`5` switch views, `⌘K`/`Ctrl K` or `/` opens the palette
-(jump to a view, device or destination; set the time range or theme), `[`
-collapses the sidebar. Rows in the device and destination tables, the Sankey's
-nodes and the routing split's rows are all links: a device or destination opens
-its page, a route opens the Connections view filtered to it. Clicking a
-connection docks its details beside the table. The time range, theme and
-sidebar state are remembered in the browser; motion is reduced when the OS asks
-for it.
+---
 
-Phones: below 768px the sidebar becomes a bottom tab bar and the top bar keeps
-to title, live rate and search (the theme switch moves into the palette); below
-640px every table becomes a list of two-line rows with a sort control, and a
-connection's details open as a bottom sheet. The UI ships a web-app manifest
-and touch icon, so it can be added to a home screen.
+## Web UI & Search
 
-Color: blue and orange mean download and upload everywhere and nothing else.
-Devices in the Sankey take their identity colors from
-`ui/src/lib/palette.ts`, which leaves those two hues out; the routing split
-uses shades of the ink, solid for traffic that left through a sing-box outbound
-and hatched for traffic that bypassed it.
+### Views
 
-Ranges: `6h 24h 7d 30d 90d 365d`. Totals and charts come from the hourly
-rollups, so the 6h/24h ranges start at the top of the hour containing the
-range start.
+| View | Shortcut | What it shows |
+| --- | --- | --- |
+| **Overview** | `1` | Network totals, traffic timeline, routing split (sing-box outbounds vs. conntrack bypasses), top devices → top destinations Sankey, first-contact feed, top devices & destinations |
+| **Devices** | `2` | Per-device totals, open connection counts, and trend sparklines; click any device for top domains, traffic chart, recent flows, first-seen targets, IP history, and inline friendly naming |
+| **Domains** | `3` | Top destinations (domains and raw IPs) with substring search; click any destination to see which devices contacted it, its traffic series, and recent flows |
+| **Live** | `4` | In-memory active connections with per-flow upload/download rates, real-time sampled throughput chart, and current talkers |
+| **Connections** | `5` | Historical and active flow log stored in SQLite (up to `retention_days`), sortable by time or bytes, with docked detail inspector (connection ID, rule, user, inbound type, IP version, outbound chain) |
 
-## How accounting works
+### Keyboard Shortcuts & Layout
 
-- Each connection is stored once (`flows.conn_id` = sing-box UUID) with
-  **absolute** byte totals. The subscription snapshot supplies totals, UPDATE
-  deltas are added, and the CLOSED event's final totals are merged with
-  `max()` (they include bytes moved after the last tick).
-- Upserts never lower totals. Each flow remembers how much of its total was
-  already added to `rollup_hourly` (`up_rolled`/`down_rolled`); only the
-  difference is added, attributed to the hour it was observed. Restarts,
-  re-subscriptions and replayed closed connections therefore do not double
-  count.
-- Open connections are checkpointed every `checkpoint_interval`; new and
-  closed ones within ~5 s. On a snapshot, flows the DB still has open but the
-  router no longer knows are closed at their last-seen time.
-- Bytes of connections that were already open when netwatch started (or
-  reconnected after a long gap) are attributed to the hour they were first
-  observed.
+- `1`–`5`: Switch views
+- `⌘K` / `Ctrl+K` or `/`: Open command palette (jump to view, device, or destination; change range or theme)
+- `[`: Collapse or expand sidebar
+- **Time ranges**: `6h`, `24h`, `7d`, `30d`, `90d`, `365d`. Totals and charts read from hourly rollups, so `6h`/`24h` align to the top of the starting hour. The routing split and Connections view query raw flows and therefore reach back up to `retention_days`.
+- **Mobile & PWA**: Below `768px`, the sidebar switches to a bottom tab bar; below `640px`, tables collapse into two-line lists and connection details open as a bottom sheet. Includes a web-app manifest and touch icon for home-screen installation.
+- **Color semantics**: Blue and orange consistently represent download and upload throughout the UI. Sankey device colors exclude those hues; the routing split uses solid ink for `sing-box` outbounds and hatched fills for `conntrack` bypasses.
 
-## Devices
+### Connection Search Syntax
 
-Devices are keyed by MAC. IP→MAC observations from leases, static hosts and
-the v4/v6 neighbour tables are stored with first/last-seen times, so rotated
-IPv6 privacy addresses keep resolving after they leave the neighbour table.
-A flow is attributed at the time it is first seen. If its source is unknown,
-an immediate router refresh is requested and the flow is re-resolved when it
-is next written. Special keys:
+Both **Connections** (`/api/flows`) and **Live** use the same query syntax. Space-separated terms are ANDed. Plain words match device key/name, domain/target, source/destination IP, outbound, or chain. Keyed filters target specific fields:
 
-- `router` — sources that are router addresses (LAN/WAN/tun/loopback).
-- `inbound:<tag>[:<user>]` — flows arriving on non-tun sing-box inbounds
-  (e.g. the shadowsocks inbounds used by remote clients) whose source is not a
-  LAN device. Shown as "Remote via …".
-- `ip:<addr>` — unresolved source (shown as "Unknown <addr>").
+| Filter | Match type | Example |
+| --- | --- | --- |
+| `device:` | substring (key, hostname, friendly name) | `device:nas` |
+| `domain:` | substring | `domain:github.com` |
+| `target:` | exact (domain or destination IP) | `target:1.1.1.1` |
+| `source:` | substring (`ip:port`) | `source:192.168.2.42` |
+| `destination:` | substring (`ip:port` or domain) | `destination:443` |
+| `port:` | exact destination port | `port:53` |
+| `network:` | exact (`tcp`, `udp`, …) | `network:udp` |
+| `protocol:` | substring (sniffed protocol, e.g. `tls`, `quic`, `http`) | `protocol:quic` |
+| `inbound:` | substring | `inbound:ct:forward` |
+| `inbound.type:` | substring (`tun`, `conntrack`, `shadowsocks`, …) | `inbound.type:conntrack` |
+| `outbound:` | substring (outbound or chain) | `outbound:direct` |
+| `rule:` | substring | `rule:geosite` |
+| `user:` | substring | `user:alice` |
 
-Hostnames come from DHCP leases, uci static host `name`, and
-`/tmp/hosts/*`. Static hosts without a name and devices with static IPs that
-never send a DHCP hostname show their MAC until you set a friendly name.
+Example: `device:appletv network:udp outbound:proxy port:443`
 
-## What is and is not captured
+---
 
-Captured:
-- Everything going through sing-box `tun-in` (auto_route/auto_redirect),
-  with sniffed domain (TLS SNI / HTTP Host / QUIC), protocol, outbound chain.
-- Remote clients via the shadowsocks inbounds.
-- From conntrack, flows sing-box does not handle:
-  - `ct:forward` — LAN host → internet bypassing the tun (e.g. hosts listed in
-    the tun's `exclude_mac_address`, `route_exclude_address` targets, IPv6
-    routed directly);
-  - `ct:private` — LAN host → route-excluded private ranges (10/8, 100.64/10,
-    172.16/12, ...);
-  - `ct:portfwd` — inbound port-forwards (DNAT to a LAN host);
-  - `ct:inbound` — inbound routed IPv6 to LAN hosts;
-  - `ct:hairpin` — LAN → WAN address reflected to a LAN host.
-  Conntrack flows have no domain (shown by destination IP) and come from
-  `nf_conntrack_acct` byte counters, sampled every 20 s. Very short flows can
-  be missed entirely if their entry expires between polls, and bytes moved
-  after the last sample are lost.
+## JSON API
 
-Not captured:
-- LAN↔LAN traffic on the same bridge (never touches the router's netfilter).
-- Router-local services (LuCI, DNS to the router, ssh) — deliberately
-  skipped.
-- Domains for flows sing-box could not sniff (~15% of flows, e.g. raw
-  IP/UDP); those are listed by destination IP.
-- DNS query names (no DNS log source is used).
+All endpoints return JSON and default to `range=24h` where applicable (`6h | 24h | 7d | 30d | 90d | 365d`).
+
+| Method & Path | Query / Body | Description |
+| --- | --- | --- |
+| `GET /api/status` | — | Stream, resolver, and conntrack health, uptime, live total rates (`rate_down`, `rate_up`), and open flow count (`open_all`) |
+| `GET /api/overview` | `range` | Network totals, bucketed series, top devices/targets, Sankey links, recent first-contact targets, and routing split |
+| `GET /api/devices` | `range`, `all=1` | Device totals, open counts, and per-bucket sparklines (`all=1` includes devices with no traffic in the range) |
+| `GET /api/device` | `key`, `range` | Single device details, top targets, traffic series, recent flows, new targets in range, and IP history |
+| `POST /api/device/name` | `{"key":"…","name":"…"}` | Set or clear a device's friendly name (`Content-Type: application/json` required) |
+| `GET /api/domains` | `range`, `q`, `limit` | Top destinations across all devices (default `limit=200`, max `1000`) |
+| `GET /api/domain` | `target`, `range` | Devices that contacted `target`, traffic series, and recent flows |
+| `GET /api/live` | — | Currently open flows (sing-box + conntrack) sorted by current transfer rate |
+| `GET /api/flows` | `range`, `state`, `sort`, `q`, `limit` | Recorded flows (`state=open\|closed\|all`, `sort=date\|bytes`, default `limit=500`, max `2000`) |
+
+---
+
+## Internals & Scope
+
+### Accounting
+
+- Every connection is stored once (`flows.conn_id` = sing-box UUID, or a deterministic hash ID for conntrack entries) with **absolute** byte totals.
+- Subscription snapshots supply initial totals, `UPDATE` deltas are accumulated, and `CLOSED` events merge final totals via `max()`. Upserts never decrease byte totals.
+- Each flow tracks how many bytes have already been rolled into `rollup_hourly` (`up_rolled`, `down_rolled`); only the unrolled difference is added to the current observation hour. Restarts, reconnects, and replayed close events do not double-count.
+- New and closed flows flush within ~5 seconds; open flows checkpoint every `checkpoint_interval` and on graceful shutdown. On stream reconnect/snapshot, flows still open in SQLite that the router no longer reports are closed at their last-seen timestamp.
+- Traffic from connections already open when `netwatch` starts (or after a long outage) is attributed to the hour it is first observed.
+
+### Device Attribution
+
+Devices are keyed by lowercase MAC address. Every IP→MAC observation from DHCP leases, UCI static hosts, and IPv4/IPv6 neighbour tables is stored with `first_seen`/`last_seen` timestamps so rotated IPv6 privacy addresses continue resolving after leaving the neighbour table.
+
+If a flow arrives from an unknown IP, `netwatch` triggers an immediate rate-limited router refresh and re-resolves the flow on its next write. Special device keys:
+
+- `router` — Router-owned addresses (LAN, WAN, tun, loopback).
+- `inbound:<tag>[:<user>]` — Non-LAN clients arriving on non-tun `sing-box` inbounds (e.g. Shadowsocks), displayed as `Remote via …`.
+- `ip:<addr>` — Unresolved source IP, displayed as `Unknown <addr>`.
+
+Hostnames are pulled from DHCP leases, UCI static host `name`, and `/tmp/hosts/*`. Devices without a hostname display their MAC address until given a friendly name in the UI.
+
+### What Is and Is Not Captured
+
+**Captured:**
+- All traffic passing through `sing-box` `tun-in` (`auto_route`/`auto_redirect`), including sniffed domains, protocols, rules, and outbound chains.
+- Remote client traffic on non-tun `sing-box` inbounds.
+- Non-sing-box flows via `nf_conntrack`, classified as:
+  - `ct:forward` — LAN host → public internet bypassing the tun (e.g. `exclude_mac_address`, `route_exclude_address`, direct IPv6)
+  - `ct:private` — LAN host → route-excluded private/non-public ranges (`10/8`, `100.64/10`, `172.16/12`, `fc00::/7`, …)
+  - `ct:portfwd` — Inbound DNAT port-forwards to a LAN host
+  - `ct:inbound` — Inbound routed IPv6 to a LAN host
+  - `ct:hairpin` — LAN → WAN hairpin NAT reflected to a LAN host
+
+**Not captured / limitations:**
+- **Same-bridge LAN↔LAN traffic** — Switched directly on the bridge without hitting the router's netfilter.
+- **Router-local services** — LuCI, router DNS, SSH to the router (intentionally excluded).
+- **Unsniffable domains** — Raw IP/UDP flows that `sing-box` cannot sniff (~15% of flows) and all `conntrack` flows have no domain and are grouped by destination IP.
+- **DNS query logs** — `netwatch` does not ingest DNS query logs.
+- **Very short conntrack flows** — Because `/proc/net/nf_conntrack` is polled every `20s`, flows that open and expire between polls are missed, and bytes transferred after the final poll before closure are not recorded.
+
+---
+
+## Development
+
+### Backend (Go)
+
+```sh
+go test ./...
+go build -o netwatch ./cmd/netwatch
+```
+
+### Frontend (React + Vite + Tailwind v4)
+
+The built frontend is committed under `internal/web/static/` and embedded into the Go binary via `//go:embed`. Node.js is only needed when changing the UI:
+
+```sh
+cd ui
+npm install
+npm run dev      # http://localhost:5173, proxies /api -> http://127.0.0.1:8377
+                 # override target: NETWATCH_DEV_API=http://host:8377 npm run dev
+npm run build    # tsc --noEmit + vite build into ../internal/web/static
+```
+
+Rebuild the Go binary after `npm run build` to embed the updated static bundle.
+
+The UI uses Vite, React 19, Tailwind CSS v4, [Beautiful UI](https://www.beautifului.dev/) foundations/atoms, and [EvilCharts](https://evilcharts.com/) (Recharts). Local patches to copied-in UI primitives are marked with `netwatch patch` (notably disabling runtime `<style>` injection so the UI works cleanly under `style-src 'self'`).
+
+### Regenerating gRPC Bindings
+
+The gRPC client in `internal/pb/` is generated from a minimal subset of `sing-box`'s `daemon/started_service.proto` in `proto/started_service.proto`:
+
+```sh
+GOBIN=/tmp/nwbin go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+GOBIN=/tmp/nwbin go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+PATH=/tmp/nwbin:$PATH protoc -I proto \
+  --go_out=internal/pb --go_opt=paths=source_relative \
+  --go-grpc_out=internal/pb --go-grpc_opt=paths=source_relative \
+  proto/started_service.proto
+```
+
+### Project Layout
+
+```text
+cmd/netwatch/       CLI entrypoint (run, init-config)
+internal/
+  collector/        sing-box gRPC stream subscription & periodic flusher
+  config/           TOML + environment configuration loader
+  conntrack/        /proc/net/nf_conntrack parser, classifier, and poller
+  flow/             Shared flow data model
+  pb/               Generated protobuf/gRPC bindings for sing-box StartedService
+  resolver/         Router SSH state parser & historical IP->MAC resolver
+  sshrun/           Multiplexed OpenSSH command runner
+  store/            SQLite WAL schema, idempotent upserts, rollups, and queries
+  tracker/          In-memory live connection tracker & rate calculation
+  web/              HTTP server, JSON API, security headers, embedded static UI
+proto/              Trimmed sing-box started_service.proto
+ui/                 React + Vite + Tailwind v4 frontend source
+netwatch.service    systemd user service unit
+```
